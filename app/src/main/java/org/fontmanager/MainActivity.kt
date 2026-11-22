@@ -183,7 +183,7 @@ private fun PreviewScreen(library: FontLibrary, export: () -> Unit) {
                         },
                         update = { view ->
                             if (view.text.toString() != library.text) { view.setText(library.text); view.setSelection(view.text.length) }
-                            view.typeface = library.face
+                            if (view.tag !== library.face) { view.typeface = library.face; view.tag = library.face }
                             val variations = library.variationSettings()
                             if (variations.isNotEmpty()) view.setFontVariationSettings(variations)
                             view.fontFeatureSettings = library.featureSettings().ifEmpty { null }
