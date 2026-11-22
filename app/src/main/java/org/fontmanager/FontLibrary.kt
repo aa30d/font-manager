@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
+import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.text.Layout
@@ -23,7 +24,7 @@ import java.util.ArrayDeque
 private const val MAX_FONT_SIZE = 64L * 1024 * 1024
 private const val SAMPLE = "کلاغ فرز و چابک ظهر هر روز با صدای ضخیم و عذاب‌آورش به جستجوی یک مثقال گنج پنهان در حیاط رژه می‌رفت\nThe quick brown fox jumps over the lazy dog."
 
-data class FontEntry(val uri: Uri, val name: String, val source: String, val info: FontInspection, val privateFile: File? = null)
+data class FontEntry(val uri: Uri, val name: String, val source: String, val info: FontInspection, val privateFile: File? = null, val location: String = "")
 data class FontSource(val uri: Uri, val deep: Boolean, val status: String = "آمادهٔ بررسی")
 
 class FontLibrary(app: Application) : AndroidViewModel(app) {
@@ -41,7 +42,9 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     var opening by mutableStateOf(false); private set
     var text by mutableStateOf(SAMPLE)
     var size by mutableFloatStateOf(48f)
-    var direction by mutableIntStateOf(0)
+    var lineSpacing by mutableFloatStateOf(1f)
+    val axisValues = mutableStateMapOf<String, Float>()
+    val featureValues = mutableStateMapOf<String, Boolean>()
     var alignment by mutableIntStateOf(1)
     private var scanJob: Job? = null
     private var openJob: Job? = null
@@ -96,12 +99,29 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
             return file
         } catch (t: Throwable) { file.delete(); throw t }
     }
+    // The external-storage document provider explicitly encodes volume and relative document ID.
+    // Other providers are opaque: do not pretend that their document IDs are filesystem paths.
+    private fun displayLocation(uri: Uri): String {
+        if (uri.scheme == "content" && uri.authority == "com.android.externalstorage.documents") {
+            val id = try { if (DocumentsContract.isDocumentUri(getApplication(), uri)) DocumentsContract.getDocumentId(uri) else DocumentsContract.getTreeDocumentId(uri) } catch (_: Exception) { null }
+            if (id != null && id.startsWith("primary:")) {
+                val relative = id.substringAfter(':')
+                if (relative.split('/').none { it == ".." || it == "." }) {
+                    @Suppress("DEPRECATION")
+                    return Environment.getExternalStorageDirectory().absolutePath + if (relative.isEmpty()) "" else "/$relative"
+                }
+            }
+            if (id != null) return "شناسهٔ سند: $id"
+        }
+        return "مسیر واقعی از ارائه‌دهنده در دسترس نیست: $uri"
+    }
+    fun sourceLocation(uri: Uri): String = displayLocation(uri)
     private suspend fun inspect(uri: Uri, name: String, source: String, keep: Boolean): FontEntry {
         val file = copy(uri, if (keep) File(getApplication<Application>().filesDir, "imports") else getApplication<Application>().cacheDir)
         try {
             val info = engine.inspect(file)
             if (info.format == "TTF" || info.format == "OTF") engine.typeface(file)
-            return FontEntry(if (keep) Uri.fromFile(file) else uri, name, source, info, if (keep) file else null)
+            return FontEntry(if (keep) Uri.fromFile(file) else uri, name, source, info, if (keep) file else null, displayLocation(uri))
         } catch (t: Throwable) { file.delete(); throw t }
         finally { if (!keep) file.delete() }
     }
@@ -180,6 +200,8 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     }
     fun open(entry: FontEntry) {
         openJob?.cancel(); selected = entry; face = null; opening = true
+        axisValues.clear(); entry.info.axes.forEach { axisValues[it.tag] = it.default }
+        featureValues.clear(); entry.info.features.forEach { featureValues[it] = it in setOf("liga", "clig", "calt") }
         openJob = viewModelScope.launch {
             try {
                 if (entry.info.format in listOf("WOFF", "WOFF2")) return@launch
@@ -194,16 +216,38 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
         }
     }
     fun back() { openJob?.cancel(); selected = null; face = null; opening = false }
+    fun variationSettings(): String = axisValues.entries.joinToString(", ") { "'${it.key}' ${it.value}" }
+    fun featureSettings(): String = featureValues.entries.joinToString(", ") { "'${it.key}' ${if (it.value) 1 else 0}" }
     fun export(uri: Uri) {
         val typeface = face ?: return
-        val content = text; val textSize = size; val dir = direction; val align = alignment
+        val content = text; val textSize = size; val align = alignment; val spacing = lineSpacing
+        val variations = variationSettings(); val features = featureSettings()
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.IO) {
-                    val paint = TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; this.textSize = textSize; this.typeface = typeface }
-                    val layout = StaticLayout.Builder.obtain(content, 0, content.length, paint, 1000)
-                        .setAlignment(when (align) { 0 -> Layout.Alignment.ALIGN_NORMAL; 2 -> Layout.Alignment.ALIGN_OPPOSITE; else -> Layout.Alignment.ALIGN_CENTER })
-                        .setTextDirection(when (dir) { 1 -> TextDirectionHeuristics.RTL; 2 -> TextDirectionHeuristics.LTR; else -> TextDirectionHeuristics.FIRSTSTRONG_LTR })
+                    val paint = TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                        color = Color.BLACK; this.textSize = textSize; this.typeface = typeface
+                        if (variations.isNotEmpty()) setFontVariationSettings(variations)
+                        if (features.isNotEmpty()) fontFeatureSettings = features
+                    }
+                    // ALIGN_NORMAL/OPPOSITE are relative to each paragraph's direction. Use spans
+                    // so left and right remain physical alignments for mixed-direction paragraphs.
+                    val styled = android.text.SpannableString(content)
+                    if (align == 0 || align == 2 || align == 3) {
+                        var start = 0
+                        while (start < content.length) {
+                            val next = content.indexOf('\n', start).let { if (it < 0) content.length else it + 1 }
+                            val rtl = TextDirectionHeuristics.FIRSTSTRONG_LTR.isRtl(content, start, next - start)
+                            val wantRight = align == 2
+                            val paragraphAlignment = if (wantRight == rtl) Layout.Alignment.ALIGN_NORMAL else Layout.Alignment.ALIGN_OPPOSITE
+                            styled.setSpan(android.text.style.AlignmentSpan.Standard(paragraphAlignment), start, next, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                            start = next
+                        }
+                    }
+                    val layout = StaticLayout.Builder.obtain(styled, 0, styled.length, paint, 1000)
+                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
+                        .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
+                        .setLineSpacing(0f, spacing)
                         .setJustificationMode(if (align == 3) Layout.JUSTIFICATION_MODE_INTER_WORD else Layout.JUSTIFICATION_MODE_NONE).build()
                     val bitmap = Bitmap.createBitmap(1080, 1080, Bitmap.Config.ARGB_8888)
                     try {
