@@ -206,7 +206,7 @@ class MainActivity : Activity() {
             try {
                 val paint = TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = Color.BLACK; this.textSize = textSize; typeface = engine.typeface(entry.file) }
                 val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, 1000)
-                    .setAlignment(when (align) { 0 -> Layout.Alignment.ALIGN_LEFT; 2 -> Layout.Alignment.ALIGN_RIGHT; else -> Layout.Alignment.ALIGN_CENTER })
+                    .setAlignment(when (align) { 0 -> Layout.Alignment.ALIGN_NORMAL; 2 -> Layout.Alignment.ALIGN_OPPOSITE; else -> Layout.Alignment.ALIGN_CENTER })
                     .setTextDirection(when (dir) { 1 -> TextDirectionHeuristics.RTL; 2 -> TextDirectionHeuristics.LTR; else -> TextDirectionHeuristics.FIRSTSTRONG_LTR })
                     .setJustificationMode(if (align == 3) Layout.JUSTIFICATION_MODE_INTER_WORD else Layout.JUSTIFICATION_MODE_NONE).build()
                 val bitmap = Bitmap.createBitmap(1080, 1080, Bitmap.Config.ARGB_8888)
