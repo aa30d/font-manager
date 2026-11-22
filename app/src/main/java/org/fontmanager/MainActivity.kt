@@ -6,7 +6,17 @@ import android.net.Uri
 import android.text.Layout
 import android.view.Gravity
 import android.view.View
-import android.widget.TextView
+import android.widget.EditText
+import android.text.Editable
+import android.text.TextWatcher
+import android.text.InputType
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.sp
+import java.util.Locale
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -95,7 +105,7 @@ private fun LibraryScreen(library: FontLibrary, openFiles: () -> Unit, openFolde
                         library.sources.forEach { source ->
                             ElevatedCard(modifier = Modifier.fillMaxWidth()) {
                                 Column(Modifier.padding(12.dp)) {
-                                    Text(source.uri.toString(), style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    Text(library.sourceLocation(source.uri), style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                                     Text(source.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text("جست‌وجوی عمیق", modifier = Modifier.weight(1f)); Switch(checked = source.deep, onCheckedChange = { library.setDeep(source.uri, it) })
@@ -124,9 +134,9 @@ private fun LibraryScreen(library: FontLibrary, openFiles: () -> Unit, openFolde
                 ElevatedCard(onClick = { library.open(entry) }, modifier = Modifier.fillMaxWidth().height(170.dp)) {
                     Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.SpaceBetween) {
                         Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { Text("Aa ا", style = MaterialTheme.typography.headlineMedium, color = MaterialTheme.colorScheme.primary) }
-                        Text(entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(entry.info.names[16]?.firstOrNull() ?: entry.info.names[1]?.firstOrNull() ?: entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         Text(entry.info.format, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
-                        Text(entry.source, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(entry.location, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
             }
@@ -139,42 +149,124 @@ private fun LibraryScreen(library: FontLibrary, openFiles: () -> Unit, openFolde
 private fun PreviewScreen(library: FontLibrary, export: () -> Unit) {
     val entry = library.selected ?: return
     BackHandler { library.back() }
-    Scaffold(topBar = { TopAppBar(title = { Text(entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis) }, navigationIcon = { IconButton(onClick = library::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "بازگشت") } }) }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Text("${entry.info.format} · ${entry.source}", style = MaterialTheme.typography.bodySmall)
-            entry.info.warnings.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
-            if (library.opening) LinearProgressIndicator(Modifier.fillMaxWidth())
-            if (!library.opening && library.face == null) Text(if (entry.info.format in listOf("WOFF", "WOFF2")) "پیش‌نمایش این فرمت هنوز پشتیبانی نمی‌شود." else library.status)
-            if (library.face != null) {
-                OutlinedTextField(value = library.text, onValueChange = { library.text = it }, label = { Text("متن پیش‌نمایش") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
-                ElevatedCard(Modifier.fillMaxWidth()) {
-                    AndroidView(factory = { TextView(it).apply { setPadding(24, 32, 24, 32) } }, modifier = Modifier.fillMaxWidth(), update = { view ->
-                        view.typeface = library.face; view.text = library.text; view.textSize = library.size
-                        view.setTextColor(if (library.dark) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
-                        view.textDirection = when (library.direction) { 1 -> View.TEXT_DIRECTION_RTL; 2 -> View.TEXT_DIRECTION_LTR; else -> View.TEXT_DIRECTION_FIRST_STRONG }
-                        view.gravity = when (library.alignment) { 0 -> Gravity.LEFT; 2 -> Gravity.RIGHT; else -> Gravity.CENTER_HORIZONTAL }
-                        view.justificationMode = if (library.alignment == 3) Layout.JUSTIFICATION_MODE_INTER_WORD else Layout.JUSTIFICATION_MODE_NONE
-                    })
+    var tab by remember(entry) { mutableIntStateOf(0) }
+    Scaffold(topBar = {
+        TopAppBar(title = { Text(entry.info.names[16]?.firstOrNull() ?: entry.info.names[1]?.firstOrNull() ?: entry.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            navigationIcon = { IconButton(onClick = library::back) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "بازگشت") } },
+            actions = { IconButton(onClick = export, enabled = library.face != null) { Icon(Icons.Default.Download, "ذخیره PNG") } })
+    }) { padding ->
+        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
+            val density = LocalDensity.current
+            val maximum = maxHeight.value
+            var panelHeight by remember { mutableFloatStateOf(maximum * .32f) }
+            val minHeight = minOf(150f, maximum * .45f)
+            val maxPanelHeight = maxOf(minHeight, maximum * .70f)
+            val actualHeight = panelHeight.coerceIn(minHeight, maxPanelHeight)
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    if (library.opening) CircularProgressIndicator()
+                    else if (library.face == null) Text(if (entry.info.format in listOf("WOFF", "WOFF2")) "پیش‌نمایش این فرمت هنوز پشتیبانی نمی‌شود." else library.status, modifier = Modifier.padding(20.dp))
+                    else AndroidView(
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                        factory = { context ->
+                            EditText(context).apply {
+                                setBackgroundColor(android.graphics.Color.TRANSPARENT)
+                                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+                                setText(library.text)
+                                setPadding(12, 24, 12, 24)
+                                addTextChangedListener(object : TextWatcher {
+                                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) { library.text = s?.toString() ?: "" }
+                                    override fun afterTextChanged(s: Editable?) {}
+                                })
+                            }
+                        },
+                        update = { view ->
+                            if (view.text.toString() != library.text) { view.setText(library.text); view.setSelection(view.text.length) }
+                            view.typeface = library.face
+                            val variations = library.variationSettings()
+                            if (variations.isNotEmpty()) view.setFontVariationSettings(variations)
+                            view.fontFeatureSettings = library.featureSettings().ifEmpty { null }
+                            view.textSize = library.size
+                            view.setLineSpacing(0f, library.lineSpacing)
+                            view.setTextColor(if (library.dark) android.graphics.Color.WHITE else android.graphics.Color.BLACK)
+                            view.textDirection = View.TEXT_DIRECTION_FIRST_STRONG
+                            view.gravity = (when (library.alignment) { 0 -> Gravity.LEFT; 2 -> Gravity.RIGHT; 3 -> Gravity.LEFT; else -> Gravity.CENTER_HORIZONTAL }) or Gravity.CENTER_VERTICAL
+                            view.justificationMode = if (library.alignment == 3) Layout.JUSTIFICATION_MODE_INTER_WORD else Layout.JUSTIFICATION_MODE_NONE
+                        }
+                    )
                 }
-                Text("اندازه متن: ${library.size.toInt()}")
-                Slider(value = library.size, onValueChange = { library.size = it }, valueRange = 12f..132f)
-                ChoiceRow("جهت متن", listOf("خودکار", "راست به چپ", "چپ به راست"), library.direction) { library.direction = it }
-                ChoiceRow("هم‌ترازی", listOf("چپ", "وسط", "راست", "دوطرفه"), library.alignment) { library.alignment = it }
-                Button(onClick = export, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.Download, null); Spacer(Modifier.width(8.dp)); Text("ذخیره PNG شفاف · ۱۰۸۰ × ۱۰۸۰") }
+                Surface(modifier = Modifier.fillMaxWidth().height(actualHeight.dp), color = MaterialTheme.colorScheme.surfaceContainer, shape = androidx.compose.ui.graphics.RectangleShape, tonalElevation = 2.dp) {
+                    Column {
+                        Box(Modifier.fillMaxWidth().height(28.dp).pointerInput(minHeight, maxPanelHeight) {
+                            detectVerticalDragGestures { change, amount -> change.consume(); panelHeight = (panelHeight.coerceIn(minHeight, maxPanelHeight) - with(density) { amount.toDp().value }).coerceIn(minHeight, maxPanelHeight) }
+                        }, contentAlignment = Alignment.Center) {
+                            Box(Modifier.width(42.dp).height(4.dp).background(MaterialTheme.colorScheme.onSurfaceVariant, CircleShape))
+                        }
+                        ScrollableTabRow(selectedTabIndex = tab, edgePadding = 0.dp) {
+                            listOf("Layout", "Variation", "OpenType", "About").forEachIndexed { index, name ->
+                                Tab(selected = tab == index, onClick = { tab = index }, text = { Text(name, maxLines = 1) })
+                            }
+                        }
+                        Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            when (tab) {
+                                0 -> {
+                                    SimpleSlider("اندازه متن", library.size, 12f..132f) { library.size = it }
+                                    SimpleSlider("ارتفاع خط", library.lineSpacing, 0.7f..2.5f) { library.lineSpacing = it }
+                                    Text("هم‌ترازی", style = MaterialTheme.typography.labelLarge)
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        listOf("چپ", "وسط", "راست", "دوطرفه").forEachIndexed { i, name ->
+                                            FilterChip(selected = library.alignment == i, onClick = { library.alignment = i }, label = { Text(name, maxLines = 1, style = MaterialTheme.typography.labelSmall) }, modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                                1 -> {
+                                    if (entry.info.axes.isEmpty()) Text("محور متغیری یافت نشد یا قابل‌خواندن نیست.")
+                                    entry.info.axes.forEach { axis ->
+                                        val value = library.axisValues[axis.tag] ?: axis.default
+                                        SimpleSlider("${axis.name} (${axis.tag})", value, axis.min..axis.max, enabled = axis.min < axis.max) { library.axisValues[axis.tag] = it }
+                                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                                            Text("${formatNumber(axis.min)} – ${formatNumber(axis.max)} · پیش‌فرض ${formatNumber(axis.default)}", style = MaterialTheme.typography.bodySmall)
+                                            TextButton(onClick = { library.axisValues[axis.tag] = axis.default }) { Text("بازنشانی") }
+                                        }
+                                    }
+                                }
+                                2 -> {
+                                    if (entry.info.features.isEmpty()) Text("قابلیت قابل‌تنظیمی در GSUB یافت نشد یا قابل‌خواندن نیست.")
+                                    else Text("وجود ویژگی در فونت، کاربرد آن را برای همهٔ متن‌ها تضمین نمی‌کند.", style = MaterialTheme.typography.bodySmall)
+                                    entry.info.features.forEach { feature ->
+                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                            Text(feature, modifier = Modifier.weight(1f)); Switch(checked = library.featureValues[feature] == true, onCheckedChange = { library.featureValues[feature] = it })
+                                        }
+                                    }
+                                }
+                                3 -> {
+                                    Text("فایل: ${entry.name}")
+                                    Text("مسیر: ${entry.location}")
+                                    Text("فرمت: ${entry.info.format}")
+                                    val fields = listOf(16 to "خانوادهٔ ترجیحی", 17 to "سبک ترجیحی", 1 to "خانواده", 2 to "سبک", 4 to "نام کامل", 6 to "نام PostScript", 3 to "شناسه", 9 to "طراح", 8 to "سازنده", 5 to "نسخه", 0 to "حق نشر", 13 to "مجوز")
+                                    fields.forEach { (id, label) -> Text("$label: ${entry.info.names[id]?.joinToString(" / ") ?: "موجود نیست"}") }
+                                    entry.info.warnings.forEach { Text(it, color = MaterialTheme.colorScheme.error) }
+                                    Text(library.status, style = MaterialTheme.typography.bodySmall)
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            Text("جدول‌ها: ${entry.info.tables.sorted().joinToString().ifEmpty { "قابل‌خواندن نیست" }}", style = MaterialTheme.typography.bodySmall)
-            Text("گلیف‌ها، SVG، محورهای متغیر و ویژگی‌های OpenType هنوز در دسترس نیستند.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(library.status, style = MaterialTheme.typography.bodySmall)
         }
     }
 }
 
+private fun formatNumber(value: Float): String = String.format(Locale.ROOT, "%.2f", value)
+
 @Composable
-private fun ChoiceRow(title: String, items: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+private fun SimpleSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, enabled: Boolean = true, onChange: (Float) -> Unit) {
     Column {
-        Text(title, style = MaterialTheme.typography.titleSmall)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            items.forEachIndexed { index, item -> FilterChip(selected = selected == index, onClick = { onSelect(index) }, label = { Text(item, maxLines = 1, style = MaterialTheme.typography.labelSmall) }, modifier = Modifier.weight(1f)) }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(label, style = MaterialTheme.typography.bodyMedium)
+            Text(formatNumber(value), style = MaterialTheme.typography.bodyMedium)
         }
+        if (range.start < range.endInclusive) androidx.compose.material.Slider(value = value.coerceIn(range), onValueChange = onChange, valueRange = range, enabled = enabled, modifier = Modifier.fillMaxWidth())
     }
 }
