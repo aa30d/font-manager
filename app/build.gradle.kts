@@ -7,8 +7,9 @@ plugins {
 android {
     namespace = "org.fontmanager"
     compileSdk = 35
-    defaultConfig { applicationId = "org.fontmanager"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.2.0" }
+    defaultConfig { applicationId = "org.fontmanager"; minSdk = 26; targetSdk = 35; versionCode = 1; versionName = "0.2.0"; testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner" }
     buildFeatures { compose = true }
+    sourceSets.getByName("androidTest").assets.srcDir("src/test/resources/fonts")
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
 }
@@ -23,6 +24,8 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
     testImplementation("junit:junit:4.13.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

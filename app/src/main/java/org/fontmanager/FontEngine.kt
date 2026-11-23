@@ -6,7 +6,7 @@ import java.io.RandomAccessFile
 
 interface FontEngine {
     fun inspect(file: File): FontInspection
-    fun typeface(file: File): Typeface
+    fun typeface(file: File, variations: String = ""): Typeface
 }
 
 data class VariableAxis(val tag: String, val name: String, val min: Float, val default: Float, val max: Float)
@@ -103,5 +103,10 @@ class AndroidFontEngine : FontEngine {
             return FontInspection(format, tables.keys, warnings, names, axes, features)
         }
     }
-    override fun typeface(file: File): Typeface = Typeface.createFromFile(file)
+    override fun typeface(file: File, variations: String): Typeface {
+        val builder = Typeface.Builder(file)
+        if (variations.isNotEmpty()) builder.setFontVariationSettings(variations)
+        // createFromFile() can return Typeface.DEFAULT when loading fails, silently hiding errors.
+        return builder.build() ?: throw IllegalArgumentException("بارگذاری فونت توسط اندروید ممکن نیست")
+    }
 }

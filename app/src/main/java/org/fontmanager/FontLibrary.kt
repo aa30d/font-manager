@@ -2,18 +2,11 @@ package org.fontmanager
 
 import android.app.Application
 import android.content.Intent
-import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
-import android.text.Layout
-import android.text.StaticLayout
-import android.text.TextDirectionHeuristics
-import android.text.TextPaint
 import androidx.compose.runtime.*
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -33,7 +26,6 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     private val engine: FontEngine = AndroidFontEngine()
     val fonts = mutableStateListOf<FontEntry>()
     val sources = mutableStateListOf<FontSource>()
-    var dark by mutableStateOf(prefs.getBoolean("dark", false)); private set
     var query by mutableStateOf("")
     var status by mutableStateOf("برای بررسی پوشه‌ها، تازه‌سازی را بزنید.")
     var scanning by mutableStateOf(false); private set
@@ -48,6 +40,10 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     var alignment by mutableIntStateOf(1)
     private var scanJob: Job? = null
     private var openJob: Job? = null
+    private var variationJob: Job? = null
+    private var openedFile: File? = null
+    private var temporaryOpenedFile: File? = null
+    private var faceGeneration = 0
     private var generation = 0
 
     init {
@@ -56,7 +52,6 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
             if (parts.size == 2) sources.add(FontSource(Uri.parse(parts[1]), parts[0] == "1"))
         }
     }
-    fun toggleTheme() { dark = !dark; prefs.edit().putBoolean("dark", dark).apply() }
     private fun saveSources() { prefs.edit().putStringSet("sources", sources.map { "${if (it.deep) 1 else 0}|${it.uri}" }.toSet()).apply() }
     fun addSource(uri: Uri) {
         try {
@@ -199,66 +194,53 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
         }
     }
     fun open(entry: FontEntry) {
-        openJob?.cancel(); selected = entry; face = null; opening = true
+        back()
+        selected = entry; face = null; opening = true
         axisValues.clear(); entry.info.axes.forEach { axisValues[it.tag] = it.default }
         featureValues.clear(); entry.info.features.forEach { featureValues[it] = it in setOf("liga", "clig", "calt") }
+        val generation = ++faceGeneration
         openJob = viewModelScope.launch {
+            var temporary: File? = null
             try {
                 if (entry.info.format in listOf("WOFF", "WOFF2")) return@launch
-                face = withContext(Dispatchers.IO) {
-                    val file = entry.privateFile ?: copy(entry.uri, getApplication<Application>().cacheDir)
-                    try { engine.typeface(file) }
-                    finally { if (entry.privateFile == null) file.delete() }
+                val file = entry.privateFile ?: withContext(Dispatchers.IO) {
+                    copy(entry.uri, getApplication<Application>().cacheDir).also { temporary = it }
+                }
+                val settings = variationSettings()
+                val initial = withContext(Dispatchers.IO) { engine.typeface(file, settings) }
+                if (generation == faceGeneration) {
+                    openedFile = file; temporaryOpenedFile = temporary; temporary = null; face = initial
                 }
             } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { status = "باز کردن فونت ممکن نیست: ${e.localizedMessage}" }
-            finally { opening = false }
+            catch (e: Exception) { if (generation == faceGeneration) status = "باز کردن فونت ممکن نیست: ${e.localizedMessage}" }
+            finally {
+                temporary?.delete()
+                if (generation == faceGeneration) opening = false
+            }
         }
     }
-    fun back() { openJob?.cancel(); selected = null; face = null; opening = false }
+    fun setAxis(tag: String, value: Float) {
+        axisValues[tag] = value
+        val file = openedFile ?: return
+        val generation = ++faceGeneration
+        val settings = variationSettings()
+        variationJob?.cancel()
+        variationJob = viewModelScope.launch {
+            try {
+                // Avoid rebuilding a typeface for every intermediate slider event.
+                delay(40)
+                val updated = withContext(Dispatchers.IO) { engine.typeface(file, settings) }
+                if (generation == faceGeneration) face = updated
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { if (generation == faceGeneration) status = "اعمال محور ممکن نیست: ${e.localizedMessage}" }
+        }
+    }
+    fun back() {
+        faceGeneration++; openJob?.cancel(); variationJob?.cancel()
+        selected = null; face = null; opening = false; openedFile = null
+        temporaryOpenedFile?.delete(); temporaryOpenedFile = null
+    }
     fun variationSettings(): String = axisValues.entries.joinToString(", ") { "'${it.key}' ${it.value}" }
     fun featureSettings(): String = featureValues.entries.joinToString(", ") { "'${it.key}' ${if (it.value) 1 else 0}" }
-    fun export(uri: Uri) {
-        val typeface = face ?: return
-        val content = text; val textSize = size; val align = alignment; val spacing = lineSpacing
-        val variations = variationSettings(); val features = featureSettings()
-        viewModelScope.launch {
-            try {
-                withContext(Dispatchers.IO) {
-                    val paint = TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                        color = Color.BLACK; this.textSize = textSize; this.typeface = typeface
-                        if (variations.isNotEmpty()) setFontVariationSettings(variations)
-                        if (features.isNotEmpty()) fontFeatureSettings = features
-                    }
-                    // ALIGN_NORMAL/OPPOSITE are relative to each paragraph's direction. Use spans
-                    // so left and right remain physical alignments for mixed-direction paragraphs.
-                    val styled = android.text.SpannableString(content)
-                    if (align == 0 || align == 2 || align == 3) {
-                        var start = 0
-                        while (start < content.length) {
-                            val next = content.indexOf('\n', start).let { if (it < 0) content.length else it + 1 }
-                            val rtl = TextDirectionHeuristics.FIRSTSTRONG_LTR.isRtl(content, start, next - start)
-                            val wantRight = align == 2
-                            val paragraphAlignment = if (wantRight == rtl) Layout.Alignment.ALIGN_NORMAL else Layout.Alignment.ALIGN_OPPOSITE
-                            styled.setSpan(android.text.style.AlignmentSpan.Standard(paragraphAlignment), start, next, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                            start = next
-                        }
-                    }
-                    val layout = StaticLayout.Builder.obtain(styled, 0, styled.length, paint, 1000)
-                        .setAlignment(Layout.Alignment.ALIGN_CENTER)
-                        .setTextDirection(TextDirectionHeuristics.FIRSTSTRONG_LTR)
-                        .setLineSpacing(0f, spacing)
-                        .setJustificationMode(if (align == 3) Layout.JUSTIFICATION_MODE_INTER_WORD else Layout.JUSTIFICATION_MODE_NONE).build()
-                    val bitmap = Bitmap.createBitmap(1080, 1080, Bitmap.Config.ARGB_8888)
-                    try {
-                        val canvas = Canvas(bitmap); canvas.translate(40f, ((1080 - layout.height) / 2f).coerceAtLeast(0f)); layout.draw(canvas)
-                        resolver.openOutputStream(uri, "w")?.use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) } ?: error("فایل خروجی باز نشد")
-                    } finally { bitmap.recycle() }
-                }
-                status = "PNG ذخیره شد."
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { status = "ذخیره ممکن نشد: ${e.localizedMessage}" }
-        }
-    }
-    override fun onCleared() { scanJob?.cancel(); openJob?.cancel(); super.onCleared() }
+    override fun onCleared() { scanJob?.cancel(); back(); super.onCleared() }
 }
