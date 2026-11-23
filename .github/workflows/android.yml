@@ -23,7 +23,7 @@ jobs:
       - name: Build debug APK
         run: |
           set -o pipefail
-          gradle :app:testDebugUnitTest :app:assembleDebug --console=plain 2>&1 | tee build.log || {
+          gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --console=plain 2>&1 | tee build.log || {
             grep -E "^e:|^error:|^\* What went wrong" build.log | head -10 | while IFS= read -r line; do echo "::error::$line"; done
             exit 1
           }
