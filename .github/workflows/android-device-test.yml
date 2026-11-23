@@ -31,4 +31,4 @@ jobs:
           api-level: 29
           arch: x86_64
           disable-animations: true
-          script: gradle :app:connectedDebugAndroidTest --console=plain
+          script: bash .github/scripts/device-tests.sh
