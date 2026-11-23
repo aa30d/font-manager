@@ -24,10 +24,11 @@ class VariableFontTest {
         } finally { bitmap.recycle() }
     }
     @Test fun selectedVariableFontRendersAndWeightChanges() {
-        val context = InstrumentationRegistry.getInstrumentation().context
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
         val file = File.createTempFile("inter-variable", ".ttf", context.cacheDir)
         try {
-            context.assets.open("Inter-variable.ttf").use { input -> file.outputStream().use { input.copyTo(it) } }
+            instrumentation.context.assets.open("Inter-variable.ttf").use { input -> file.outputStream().use { input.copyTo(it) } }
             val engine = AndroidFontEngine()
             val thin = engine.typeface(file, "'wght' 100")
             val bold = engine.typeface(file, "'wght' 900")
@@ -36,7 +37,7 @@ class VariableFontTest {
         } finally { file.delete() }
     }
     @Test fun badFontDoesNotSilentlyUseSystemFont() {
-        val context = InstrumentationRegistry.getInstrumentation().context
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
         val file = File.createTempFile("invalid", ".ttf", context.cacheDir)
         try {
             file.writeText("not a font")
