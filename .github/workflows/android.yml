@@ -21,10 +21,15 @@ jobs:
         with:
           gradle-version: '8.9'
       - name: Build debug APK
-        run: |
+        run: |-
           set -o pipefail
           gradle :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --console=plain 2>&1 | tee build.log || {
-            grep -E "^e:|^error:|^\* What went wrong" build.log | head -10 | while IFS= read -r line; do echo "::error::$line"; done
+            # Kotlin errors start with "e:" and Gradle explains itself after "* What went wrong".
+            grep -E "^e: |^error: |^\* What went wrong|FAILED$|^Caused by:" build.log | head -20 | while IFS= read -r line; do
+              echo "::error file=app/build.log::${line//'%'/'%25'}"
+            done
+            # Unit-test assertion messages live in the JUnit XML, not in build.log.
+            python3 .github/scripts/report-unit-failures.py || true
             exit 1
           }
       - name: Upload debug APK
