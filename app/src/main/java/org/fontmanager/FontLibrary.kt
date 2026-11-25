@@ -17,16 +17,20 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.File
 import java.util.ArrayDeque
+import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val MAX_FONT_SIZE = 64L * 1024 * 1024
-private const val SAMPLE = "کلاغ فرز و چابک ظهر هر روز با صدای ضخیم و عذاب‌آورش به جستجوی یک مثقال گنج پنهان در حیاط رژه می‌رفت\nThe quick brown fox jumps over the lazy dog."
+
+/** Sample text for fonts that do not cover Persian, so the specimen is never rendered blank. */
+private const val LATIN_SAMPLE = "The quick brown fox jumps over the lazy dog"
+private const val PERSIAN_SAMPLE = "کلاغ فرز و چابک ظهر هر روز با صدای ضخیم و عذاب‌آورش به جستجوی یک مثقال گنج پنهان در حیاط رژه می‌رفت\nThe quick brown fox jumps over the lazy dog."
 
 data class FontEntry(
     val uri: Uri,
@@ -38,8 +42,19 @@ data class FontEntry(
     /** Identity of the backing document, used to reuse cached metadata without re-reading the file. */
     val cacheKey: String = uri.toString(),
     val size: Long = -1,
-    val lastModified: Long = -1
-)
+    val lastModified: Long = -1,
+    val numericId: Long = -1
+) {
+    /** Family name as the font itself declares it, falling back to the file name. */
+    val familyName: String get() = info.names[16]?.firstOrNull() ?: info.names[1]?.firstOrNull() ?: name
+
+    /**
+     * Text drawn as the specimen. A font without Persian coverage would show a row of "missing
+     * glyph" boxes, so Latin-only fonts get Latin sample text instead.
+     */
+    val specimen: String get() = if (info.arabicScript) PERSIAN_SAMPLE else LATIN_SAMPLE
+}
+
 data class FontSource(val uri: Uri, val deep: Boolean, val status: String = "آمادهٔ بررسی")
 
 /** How the preview text is laid out. */
@@ -59,7 +74,7 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     var selected by mutableStateOf<FontEntry?>(null); private set
     var face by mutableStateOf<Typeface?>(null); private set
     var opening by mutableStateOf(false); private set
-    var text by mutableStateOf(SAMPLE)
+    var text by mutableStateOf(PERSIAN_SAMPLE)
     var size by mutableFloatStateOf(48f)
     var lineSpacing by mutableFloatStateOf(1f)
     val axisValues = mutableStateMapOf<String, Float>()
@@ -72,48 +87,64 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     private var faceGeneration = 0
 
     init {
-        restore()
+        restoreSources()
+        restoreLibrary()
     }
 
     // ---------------------------------------------------------------- persistence
 
-    /** Restores the last library (and its metadata) before any scan runs. */
-    private fun restore() {
-        val snapshot = cache.load()
+    private fun restoreSources() {
         prefs.getStringSet("sources", emptySet())?.forEach {
             val parts = it.split("|", limit = 2)
             if (parts.size == 2) sources.add(FontSource(Uri.parse(parts[1]), parts[0] == "1"))
         }
-        val restored = staleSafeEntries(snapshot.entries)
-        fonts.addAll(restored)
-        if (restored.isNotEmpty()) {
-            status = "${restored.size} فونت از حافظهٔ ذخیره‌شده بارگذاری شد؛ برای بررسی دوباره، تازه‌سازی را بزنید."
-        }
-        // Drop restored entries that belong to folders the user removed in the meantime.
-        val knownSources = (sources.map { it.uri.toString() } + IMPORTED_SOURCE).toSet()
-        val orphans = fonts.filter { entry -> entry.source.startsWith("پوشه: ") && entry.source.removePrefix("پوشه: ") !in knownSources }
-        if (orphans.isNotEmpty()) { fonts.removeAll(orphans); persist() }
     }
 
-    /** Turns cached rows back into library entries, dropping any whose file changed or disappeared. */
-    private fun staleSafeEntries(cachedEntries: List<FontCache.CachedEntry>): List<FontEntry> = cachedEntries.mapNotNull { cached ->
-        try {
-            val uri = Uri.parse(cached.uri)
-            if (cached.source == IMPORTED_SOURCE) {
-                val path = uri.path ?: return@mapNotNull null
-                val file = File(path)
-                if (!file.isFile) return@mapNotNull null
-                FontEntry(uri, cached.displayName, cached.source, cached.info, file, cached.location, cached.uri, cached.size, cached.lastModified)
-            } else {
-                // Cheap validation only: the document must still exist and be unchanged.
-                val stamp = documentStampOrNull(uri) ?: return@mapNotNull null
-                val (size, modified) = stamp
-                if (cached.lastModified > 0 && modified > 0 && cached.lastModified != modified) return@mapNotNull null
-                if (cached.size > 0 && size > 0 && cached.size != size) return@mapNotNull null
-                FontEntry(uri, cached.displayName, cached.source, cached.info, null, cached.location, cached.uri, size, modified)
+    /**
+     * Loads the cached library in the background.
+     *
+     * Nothing here may query the document provider per font: with a few thousand fonts that meant
+     * thousands of resolver round-trips before the first frame, which is what made startup slow.
+     * Cached rows are trusted as-is, and removed or changed files are reconciled by the next scan,
+     * which already sees the size and modification date in its directory listing.
+     */
+    private fun restoreLibrary() {
+        viewModelScope.launch {
+            val snapshot = withContext(Dispatchers.IO) { cache.load() }
+            if (snapshot.entries.isEmpty()) return@launch
+            val knownSources = (sources.map { it.uri.toString() } + IMPORTED_SOURCE).toSet()
+            val restored = snapshot.entries.mapNotNull { cached ->
+                when {
+                    cached.source == IMPORTED_SOURCE -> {
+                        val path = Uri.parse(cached.uri).path ?: return@mapNotNull null
+                        val file = File(path)
+                        if (!file.isFile) return@mapNotNull null
+                        entryOf(cached, file)
+                    }
+                    cached.source.removePrefix("پوشه: ") !in knownSources -> null
+                    else -> entryOf(cached, null)
+                }
             }
-        } catch (_: Exception) { null }
+            if (restored.isEmpty()) return@launch
+            // The user may have started a scan while the cache was loading.
+            if (scanning || fonts.isNotEmpty()) return@launch
+            fonts.addAll(restored)
+            status = "${restored.size} فونت از حافظهٔ ذخیره‌شده بارگذاری شد؛ برای بررسی دوباره، تازه‌سازی را بزنید."
+        }
     }
+
+    private fun entryOf(cached: FontCache.CachedEntry, file: File?) = FontEntry(
+        uri = Uri.parse(cached.uri),
+        name = cached.displayName,
+        source = cached.source,
+        info = cached.info,
+        privateFile = file,
+        location = cached.location,
+        cacheKey = cached.uri,
+        size = cached.size,
+        lastModified = cached.lastModified,
+        numericId = cached.numericId
+    )
 
     /** Persists metadata so the next launch can skip inspecting every file again. */
     private fun persist() {
@@ -125,7 +156,8 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
                 displayName = entry.name,
                 size = entry.size,
                 lastModified = entry.lastModified,
-                info = entry.info
+                info = entry.info,
+                numericId = entry.numericId
             )
         }
         cache.save(FontCache.Snapshot(snapshot))
@@ -161,9 +193,7 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------------- importing
 
     /** Copy only for inspection/opening; directory scans delete temporary copies immediately. */
-    private suspend fun copy(uri: Uri, directory: File): File = withContext(Dispatchers.IO) {
-        copyOnIoThread(uri, directory)
-    }
+    private suspend fun copy(uri: Uri, directory: File): File = withContext(Dispatchers.IO) { copyOnIoThread(uri, directory) }
 
     private suspend fun copyOnIoThread(uri: Uri, directory: File): File {
         val context = currentCoroutineContext()
@@ -206,18 +236,12 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
     }
     fun sourceLocation(uri: Uri): String = displayLocation(uri)
 
-    /**
-     * Size and modification date of a document, used to decide whether cached metadata is still
-     * valid. `null` means the document is gone or no longer readable.
-     */
-    private fun documentStampOrNull(uri: Uri): Pair<Long, Long>? = try {
-        resolver.query(uri, arrayOf(Document.COLUMN_SIZE, Document.COLUMN_LAST_MODIFIED), null, null, null)?.use { cursor ->
-            if (!cursor.moveToFirst()) null
-            else (if (cursor.isNull(0)) -1L else cursor.getLong(0)) to (if (cursor.isNull(1)) -1L else cursor.getLong(1))
-        }
-    } catch (_: Exception) { null }
-
-    private fun documentStamp(uri: Uri): Pair<Long, Long> = documentStampOrNull(uri) ?: (-1L to -1L)
+    private fun numericIdOf(uri: Uri): Long = try {
+        val id = DocumentsContract.getDocumentId(uri)
+        id.substringAfterLast(':').substringAfterLast('/').toLongOrNull()
+            ?: id.toLongOrNull()
+            ?: -1L
+    } catch (_: Exception) { -1L }
 
     private suspend fun inspect(
         uri: Uri,
@@ -225,27 +249,27 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
         source: String,
         keep: Boolean,
         knownSize: Long = -1,
-        knownModified: Long = -1
+        knownModified: Long = -1,
+        numericId: Long = -1
     ): FontEntry {
         val file = copy(uri, if (keep) File(getApplication<Application>().filesDir, "imports") else getApplication<Application>().cacheDir)
         try {
             val info = engine.inspect(file)
             if (info.format == "TTF" || info.format == "OTF") engine.typeface(file)
-            val (size, modified) = when {
-                keep -> file.length() to file.lastModified()
-                knownSize > 0 || knownModified > 0 -> knownSize to knownModified
-                else -> documentStamp(uri)
-            }
+            val size = if (keep) file.length() else knownSize
+            val modified = if (keep) file.lastModified() else knownModified
+            val entryUri = if (keep) Uri.fromFile(file) else uri
             return FontEntry(
-                uri = if (keep) Uri.fromFile(file) else uri,
+                uri = entryUri,
                 name = name,
                 source = source,
                 info = info,
                 privateFile = if (keep) file else null,
                 location = displayLocation(uri),
-                cacheKey = if (keep) Uri.fromFile(file).toString() else uri.toString(),
+                cacheKey = entryUri.toString(),
                 size = size,
-                lastModified = modified
+                lastModified = modified,
+                numericId = if (keep) -1 else numericId
             )
         } catch (t: Throwable) { file.delete(); throw t }
         finally { if (!keep) file.delete() }
@@ -261,8 +285,8 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
             var success = 0; var failed = 0; var lastError = ""
             for (uri in uris.distinct()) {
                 try {
-                    // Complete each copy before returning so transient grants are consumed promptly.
-                    val entry = withContext(Dispatchers.IO) { inspect(uri, name(uri), IMPORTED_SOURCE, true) }
+                    // Copies complete on the IO dispatcher; the loop stays cancellable.
+                    val entry = inspect(uri, name(uri), IMPORTED_SOURCE, true)
                     fonts.add(entry); success++
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { failed++; lastError = e.localizedMessage ?: "خطای ناشناخته" }
@@ -286,6 +310,7 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
         // Metadata already known for each document is kept before the old folder results are
         // dropped, so a rescan of an unchanged folder does not copy and parse everything again.
         val known = fonts.associateBy { it.cacheKey }
+        val knownNumeric = known.values.filter { it.numericId >= 0 }.associateBy { it.numericId }
         fonts.removeAll { it.source.startsWith("پوشه: ") }
         val snapshot = sources.toList()
         if (snapshot.isEmpty()) { status = "پوشه‌ای انتخاب نشده است."; persist(); return }
@@ -324,13 +349,27 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
                                             val childUri = DocumentsContract.buildDocumentUriUsingTree(source.uri, childId)
                                             val size = if (c.isNull(3)) -1L else c.getLong(3)
                                             val modified = if (c.isNull(4)) -1L else c.getLong(4)
-                                            val cached = known[childUri.toString()]
-                                            val usable = cached != null && (modified <= 0 || modified == cached.lastModified) && (size <= 0 || size == cached.size)
+                                            val numeric = childId.substringAfterLast(':').substringAfterLast('/').toLongOrNull() ?: -1L
+                                            val cached = known[childUri.toString()] ?: knownNumeric[numeric]
+                                            val usable = cached != null &&
+                                                (modified <= 0 || modified == cached.lastModified) &&
+                                                (size <= 0 || size == cached.size)
                                             if (usable) {
-                                                batch.add(cached.copy(name = fileName, source = "پوشه: ${source.uri}"))
+                                                batch.add(
+                                                    cached.copy(
+                                                        uri = childUri,
+                                                        name = fileName,
+                                                        source = "پوشه: ${source.uri}",
+                                                        location = displayLocation(childUri),
+                                                        cacheKey = childUri.toString(),
+                                                        size = size,
+                                                        lastModified = modified,
+                                                        numericId = numeric
+                                                    )
+                                                )
                                                 reused++; found++
                                             } else try {
-                                                batch.add(inspect(childUri, fileName, "پوشه: ${source.uri}", false, size, modified)); found++
+                                                batch.add(inspect(childUri, fileName, "پوشه: ${source.uri}", false, size, modified, numeric)); found++
                                             } catch (e: CancellationException) { throw e }
                                             catch (_: Exception) { errors++ }
                                             if (batch.size >= 32) flush()
@@ -358,6 +397,8 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
         selected = entry; face = null; opening = true
         axisValues.clear(); entry.info.axes.forEach { axisValues[it.tag] = it.default }
         featureValues.clear(); entry.info.features.forEach { featureValues[it] = it in setOf("liga", "clig", "calt") }
+        // Fresh sample text for a font that does not cover Persian, so nothing renders as boxes.
+        text = entry.specimen
         val token = ++faceGeneration
         openJob = viewModelScope.launch {
             var temporary: File? = null
@@ -396,8 +437,11 @@ class FontLibrary(app: Application) : AndroidViewModel(app) {
         temporaryOpenedFile?.delete(); temporaryOpenedFile = null
     }
 
-    fun variationSettings(): String = axisValues.entries.joinToString(", ") { "'${it.key}' ${it.value}" }
+    fun variationSettings(): String = axisValues.entries.joinToString(", ") { "'${it.key}' ${formatAxisValue(it.value)}" }
     fun featureSettings(): String = featureValues.entries.joinToString(", ") { "'${it.key}' ${if (it.value) 1 else 0}" }
+
+    /** Whole numbers stay whole in `font-variation-settings`; finer axes keep decimals. */
+    private fun formatAxisValue(value: Float): String = String.format(Locale.ROOT, "%.3f", value).trimEnd('0').trimEnd('.')
 
     /** The library narrowed by the free-text query and the advanced filters. */
     fun visibleFonts(): List<FontEntry> {

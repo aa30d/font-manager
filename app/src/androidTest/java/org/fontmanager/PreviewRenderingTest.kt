@@ -153,6 +153,67 @@ class PreviewRenderingTest {
         assertEquals("سلام", view.text.toString())
         view.update(PreviewEditText.State(text = "سلام دنیا", textSizePx = 80f, alignment = TextAlignment.Justify))
         assertEquals("سلام دنیا", view.text.toString())
-        assertEquals(80f, view.textSize, 0.01f)
+        // The visible text is painted by the view's own paint, so that is the size that matters;
+        // TextView's own text size is deliberately left alone.
+        assertEquals(80f, view.drawnLayout().paint.textSize, 0.01f)
+    }
+
+    /**
+     * Colour and typeface must come from the settings on the very first frame of a new font,
+     * otherwise a second font opened while "دوطرفه" was selected was drawn in black.
+     */
+    @Test fun firstFrameUsesTheGivenColourAndTypeface() {
+        val file = interFile()
+        try {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val view = PreviewEditText(context)
+            val typeface = AndroidFontEngine().typeface(file)
+            view.update(
+                PreviewEditText.State(
+                    text = "نمونه متن",
+                    typeface = typeface,
+                    textSizePx = 40f,
+                    textColor = Color.RED,
+                    alignment = TextAlignment.Justify
+                )
+            )
+            view.measure(View.MeasureSpec.makeMeasureSpec(600, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(800, View.MeasureSpec.AT_MOST))
+            view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+            val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            try {
+                view.draw(Canvas(bitmap))
+                var red = 0
+                var dark = 0
+                for (y in 0 until view.height) for (x in 0 until view.width) {
+                    val pixel = bitmap.getPixel(x, y)
+                    if (Color.alpha(pixel) > 0) {
+                        if (Color.red(pixel) > 120 && Color.green(pixel) < 90 && Color.blue(pixel) < 90) red++ else dark++
+                    }
+                }
+                assertTrue("Text must be painted in the requested colour, found $red red and $dark other pixels", red > 100)
+                assertTrue("No dark text may be painted, found $dark pixels", dark == 0)
+            } finally { bitmap.recycle() }
+        } finally { file.delete() }
+    }
+
+    @Test fun axisVariationIsAppliedWithoutRebuildingTheTypeface() {
+        val file = interFile()
+        try {
+            val context = InstrumentationRegistry.getInstrumentation().targetContext
+            val view = PreviewEditText(context)
+            val typeface = AndroidFontEngine().typeface(file)
+            fun render(variation: String): IntArray {
+                view.update(PreviewEditText.State(text = "Hamburgefonts", typeface = typeface, textSizePx = 90f, textColor = Color.BLACK, alignment = TextAlignment.Left, fontVariationSettings = variation))
+                view.measure(View.MeasureSpec.makeMeasureSpec(900, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(300, View.MeasureSpec.AT_MOST))
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                val bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+                try {
+                    view.draw(Canvas(bitmap))
+                    return IntArray(bitmap.width * bitmap.height).also { bitmap.getPixels(it, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height) }
+                } finally { bitmap.recycle() }
+            }
+            // Same Typeface instance both times: only the paint's settings changed.
+            assertFalse(render("'wght' 100").contentEquals(render("'wght' 900")))
+        } finally { file.delete() }
     }
 }

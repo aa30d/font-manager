@@ -40,7 +40,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
+import java.io.File
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
     private val library: FontLibrary by viewModels()
@@ -61,7 +64,8 @@ class MainActivity : ComponentActivity() {
             Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.toList() ?: emptyList()
             else -> emptyList()
         }
-        if (uris.isNotEmpty()) library.importFiles(uris)
+        val fonts = uris.filter { it.scheme in setOf("content", "file") || it.path?.contains('.') == true }
+        if (fonts.isNotEmpty()) library.importFiles(fonts)
     }
 }
 
@@ -83,6 +87,10 @@ private fun LibraryScreen(library: FontLibrary, openFiles: () -> Unit, openFolde
     var showSources by remember { mutableStateOf(false) }
     var showFilters by remember { mutableStateOf(false) }
     val filtered = remember(library.query, library.filters, library.fonts.size) { library.visibleFonts() }
+    // Cards are composed in chunks rather than all at once; with a few thousand fonts the whole
+    // grid used to compose every card before the first frame. Computed here because the lazy list
+    // scope is not composable.
+    val chunks = remember(filtered) { chunkedRows(filtered, CHUNK_SIZE) }
     Scaffold(
         topBar = {
             Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface)) {
@@ -105,8 +113,8 @@ private fun LibraryScreen(library: FontLibrary, openFiles: () -> Unit, openFolde
         },
         floatingActionButton = { ExtendedFloatingActionButton(onClick = openFiles, icon = { Icon(Icons.Default.Add, null) }, text = { Text("باز کردن فونت") }) }
     ) { padding ->
-        LazyVerticalGrid(columns = GridCells.Adaptive(160.dp), modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp), horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item(span = { GridItemSpan(maxLineSpan) }) {
+        LazyVerticalGrid(columns = GridCells.Fixed(1), modifier = Modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 96.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            item(span = { GridItemSpan(1) }) {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilledTonalButton(onClick = openFolder, modifier = Modifier.weight(1f)) { Icon(Icons.Default.CreateNewFolder, null); Spacer(Modifier.width(6.dp)); Text("افزودن پوشه", maxLines = 1) }
@@ -150,34 +158,53 @@ private fun LibraryScreen(library: FontLibrary, openFiles: () -> Unit, openFolde
                     if (library.scanning) LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
-            if (filtered.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
+            if (filtered.isEmpty()) item(span = { GridItemSpan(1) }) {
                 Text(
                     if (library.scanning) "در انتظار نتایج…" else if (library.fonts.isEmpty()) "فونتی یافت نشد. فایل یا پوشه‌ای اضافه کنید." else "هیچ فونتی با این جست‌وجو و فیلترها هم‌خوانی ندارد.",
                     modifier = Modifier.padding(vertical = 32.dp), color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
-            items(filtered) { entry ->
-                FontCard(entry) { library.open(entry) }
+            chunks.forEach { (index, rows) ->
+                item(key = "chunk-$index") {
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        rows.forEach { row ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                row.forEach { entry ->
+                                    FontCard(entry, Modifier.weight(1f)) { library.open(entry) }
+                                }
+                                // Keep the last row aligned with the grid when it is not full.
+                                repeat(CHUNK_SIZE - row.size) { Spacer(Modifier.weight(1f)) }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
 }
 
+/**
+ * Splits the filtered library into chunks of rows. Only chunks the grid brings into view are
+ * composed; a few thousand individual cards used to be composed before the first frame.
+ */
+private fun chunkedRows(entries: List<FontEntry>, perRow: Int, chunkRows: Int = 6): List<Pair<Int, List<List<FontEntry>>>> =
+    entries.chunked(perRow * chunkRows).mapIndexed { index, chunk -> index to chunk.chunked(perRow) }
+
 @Composable
-private fun FontCard(entry: FontEntry, onClick: () -> Unit) {
-    ElevatedCard(onClick = onClick, modifier = Modifier.fillMaxWidth().height(176.dp)) {
-        Column(Modifier.fillMaxSize().padding(14.dp), verticalArrangement = Arrangement.SpaceBetween) {
-            // The specimen is written in the font itself; no placeholder letters.
+private fun FontCard(entry: FontEntry, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    ElevatedCard(onClick = onClick, modifier = modifier.height(150.dp)) {
+        Column(Modifier.fillMaxSize().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            // The specimen is what identifies the font, written in the font itself.
             Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
-                FontSpecimen(entry, modifier = Modifier.fillMaxWidth())
+                FontSpecimen(entry)
             }
-            Text(entry.info.names[16]?.firstOrNull() ?: entry.info.names[1]?.firstOrNull() ?: entry.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(entry.info.format, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 if (entry.info.isVariable) Text("متغیر", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 if (entry.info.colored) Text("رنگی", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                if (!entry.info.arabicScript) Text("بدون فارسی", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
             }
-            Text(entry.location, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(entry.name, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
@@ -185,32 +212,55 @@ private fun FontCard(entry: FontEntry, onClick: () -> Unit) {
 /** Renders a short specimen in the font being previewed, loaded from its own file. */
 @Composable
 private fun FontSpecimen(entry: FontEntry, modifier: Modifier = Modifier) {
-    val file = remember(entry) { entry.privateFile }
-    val family = remember(entry.cacheKey) {
-        file?.takeIf { entry.info.format == "TTF" || entry.info.format == "OTF" }?.let {
-            runCatching { androidx.compose.ui.text.font.FontFamily(android.graphics.Typeface.createFromFile(it)) }.getOrNull()
-        }
+    val context = LocalContext.current
+    val family by produceState<androidx.compose.ui.text.font.FontFamily?>(null, entry.cacheKey) {
+        value = withContext(Dispatchers.IO) { specimenFamily(context, entry) }
     }
-    val style = MaterialTheme.typography.titleLarge.copy(
+    val style = MaterialTheme.typography.titleMedium.copy(
         fontFamily = family,
         fontWeight = FontWeight.Normal,
         color = MaterialTheme.colorScheme.primary
     )
-    if (family == null) {
-        // Folder fonts are not copied to internal storage, so their own glyphs are not available
-        // here; the specimen falls back to the family name instead of invented sample letters.
-        Text(
-            entry.info.names[16]?.firstOrNull() ?: entry.info.names[1]?.firstOrNull() ?: entry.name,
-            modifier = modifier, style = MaterialTheme.typography.titleSmall, maxLines = 2,
-            overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
-    } else {
-        Text(
-            "Aa bb ۱۲۳", modifier = modifier, style = style, maxLines = 1,
-            overflow = TextOverflow.Ellipsis, textAlign = androidx.compose.ui.text.style.TextAlign.Center
-        )
+    val sample = if (entry.info.arabicScript) "کلاغ فرز" else "Hamburgefonts"
+    // Until the font is ready the text is simply not drawn: drawing it in the system font would
+    // misrepresent the font, and the card is filled in on the next frame.
+    Text(
+        sample,
+        modifier = modifier,
+        style = style,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        color = if (family == null) Color.Transparent else MaterialTheme.colorScheme.primary
+    )
+}
+
+/**
+ * Loads a specimen typeface once per document: from the private copy of an imported font, or by
+ * opening the document itself for a font inside a folder. The document is opened read-only through
+ * the resolver; a SAF URI has no filesystem path, so the displayed path must never be opened.
+ */
+private fun specimenFamily(context: android.content.Context, entry: FontEntry): androidx.compose.ui.text.font.FontFamily? {
+    if (entry.info.format !in setOf("TTF", "OTF")) return null
+    return SPECIMENS[entry.cacheKey] ?: run {
+        val typeface = entry.privateFile?.let { file -> runCatching { android.graphics.Typeface.createFromFile(file) }.getOrNull() }
+            ?: runCatching {
+                context.contentResolver.openFileDescriptor(entry.uri, "r")?.use { descriptor ->
+                    // The typeface must be built while the descriptor is still open.
+                    android.graphics.Typeface.Builder(descriptor.fileDescriptor).build()
+                }
+            }.getOrNull()
+            ?: return null
+        androidx.compose.ui.text.font.FontFamily(typeface).also { SPECIMENS[entry.cacheKey] = it }
     }
 }
+
+/** Bounded cache so scrolling through a large library does not keep thousands of typefaces alive. */
+private val SPECIMENS = object : LinkedHashMap<String, androidx.compose.ui.text.font.FontFamily>(24, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, androidx.compose.ui.text.font.FontFamily>) = size > 40
+}
+
+private const val CHUNK_SIZE = 2
 
 @Composable
 private fun AdvancedFilters(library: FontLibrary) {
@@ -386,6 +436,13 @@ private fun AxisRow(axis: VariableAxis, value: Float, enabled: Boolean, onChange
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            // The value in use, updated while the slider is dragged.
+            Text(
+                formatNumber(value),
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary
+            )
             IconButton(onClick = { onChange(axis.default) }, enabled = enabled && value != axis.default) {
                 Icon(Icons.Default.RestartAlt, contentDescription = "بازنشانی ${axis.name}", modifier = Modifier.size(20.dp))
             }
@@ -406,26 +463,31 @@ private fun AxisRow(axis: VariableAxis, value: Float, enabled: Boolean, onChange
 
 @Composable
 private fun PreviewText(library: FontLibrary, textColor: Int, modifier: Modifier = Modifier) {
+    // Reading these maps inside the update block keeps the preview in sync with the sliders.
     val variation = library.variationSettings()
     val features = library.featureSettings()
+    fun previewState(context: android.content.Context) = PreviewEditText.State(
+        text = library.text,
+        typeface = library.face,
+        // Settings are in sp; the view works in px.
+        textSizePx = library.size * context.resources.displayMetrics.scaledDensity,
+        lineMultiplier = library.lineSpacing,
+        textColor = textColor,
+        alignment = library.alignment,
+        fontFeatureSettings = features.ifEmpty { null },
+        fontVariationSettings = variation.ifEmpty { null }
+    )
     AndroidView(
         modifier = modifier,
-        factory = { context -> PreviewEditText(context).also { view -> view.onTextEdited = { library.text = it } } },
-        update = { view ->
-            view.update(
-                PreviewEditText.State(
-                    text = library.text,
-                    typeface = library.face,
-                    // Settings are in sp; the view works in px.
-                    textSizePx = with(view.resources.displayMetrics) { library.size * scaledDensity },
-                    lineMultiplier = library.lineSpacing,
-                    textColor = textColor,
-                    alignment = library.alignment,
-                    fontFeatureSettings = features.ifEmpty { null },
-                    fontVariationSettings = variation.ifEmpty { null }
-                )
-            )
-        }
+        // The font is only shown once it is open, so the editable buffer is created already
+        // configured: nothing has to catch up on the first frames.
+        factory = { context ->
+            PreviewEditText(context).also { view ->
+                view.onTextEdited = { library.text = it }
+                view.update(previewState(context))
+            }
+        },
+        update = { view -> view.update(previewState(view.context)) }
     )
 }
 

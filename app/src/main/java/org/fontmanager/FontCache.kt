@@ -18,6 +18,10 @@ class FontCache(context: Context) {
 
     data class Snapshot(val entries: List<CachedEntry>)
 
+    /**
+     * A cached row. [numericId] is the provider's numeric document id when it has one: it lets a
+     * directory listing match an existing row without a per-file resolver query.
+     */
     data class CachedEntry(
         val uri: String,
         val source: String,
@@ -25,7 +29,8 @@ class FontCache(context: Context) {
         val displayName: String,
         val size: Long,
         val lastModified: Long,
-        val info: FontInspection
+        val info: FontInspection,
+        val numericId: Long = -1
     )
 
     fun load(): Snapshot = try {
@@ -64,6 +69,7 @@ class FontCache(context: Context) {
         put("displayName", entry.displayName)
         put("size", entry.size)
         put("lastModified", entry.lastModified)
+        if (entry.numericId >= 0) put("numericId", entry.numericId)
         put("info", JSONObject().apply {
             put("format", entry.info.format)
             put("tables", JSONArray(entry.info.tables.toList()))
@@ -115,7 +121,8 @@ class FontCache(context: Context) {
             displayName = o.optString("displayName"),
             size = o.optLong("size", -1),
             lastModified = o.optLong("lastModified", -1),
-            info = inspection
+            info = inspection,
+            numericId = o.optLong("numericId", -1)
         )
     }
 
