@@ -4,13 +4,54 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+
+            <!--
+              File managers seldom send font/*; most send application/octet-stream or a generic
+              type, and a path pattern only matches when a scheme is given too, so each combination
+              gets its own filter. The app verifies the file content itself.
+            -->
             <intent-filter>
-                <action android:name="android.intent.action.VIEW"/><category android:name="android.intent.category.DEFAULT"/><category android:name="android.intent.category.BROWSABLE"/>
-                <data android:scheme="content"/><data android:mimeType="font/ttf"/><data android:mimeType="font/otf"/><data android:mimeType="font/woff"/><data android:mimeType="font/woff2"/><data android:mimeType="application/font-sfnt"/><data android:mimeType="application/font-woff"/><data android:mimeType="application/vnd.ms-opentype"/>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content" android:mimeType="font/*"/>
+                <data android:scheme="content" android:mimeType="application/font-sfnt"/>
+                <data android:scheme="content" android:mimeType="application/font-woff"/>
+                <data android:scheme="content" android:mimeType="application/x-font-ttf"/>
+                <data android:scheme="content" android:mimeType="application/x-font-otf"/>
+                <data android:scheme="content" android:mimeType="application/x-font-truetype"/>
+                <data android:scheme="content" android:mimeType="application/x-font-opentype"/>
+                <data android:scheme="content" android:mimeType="application/vnd.ms-opentype"/>
+                <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\.ttf"/>
+                <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\.TTF"/>
+                <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\.otf"/>
+                <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\.OTF"/>
+                <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\.woff"/>
+                <data android:scheme="file" android:mimeType="*/*" android:pathPattern=".*\.woff2"/>
             </intent-filter>
+
+            <!-- Providers that report a generic type, matched on the document path instead. -->
             <intent-filter>
-                <action android:name="android.intent.action.SEND"/><action android:name="android.intent.action.SEND_MULTIPLE"/><category android:name="android.intent.category.DEFAULT"/>
-                <data android:mimeType="font/ttf"/><data android:mimeType="font/otf"/><data android:mimeType="font/woff"/><data android:mimeType="font/woff2"/><data android:mimeType="application/font-sfnt"/><data android:mimeType="application/font-woff"/><data android:mimeType="application/vnd.ms-opentype"/>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.ttf"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.otf"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.woff"/>
+                <data android:scheme="content" android:mimeType="application/octet-stream" android:pathPattern=".*\.woff2"/>
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="font/*"/>
+                <data android:mimeType="application/font-sfnt"/>
+                <data android:mimeType="application/font-woff"/>
+                <data android:mimeType="application/x-font-ttf"/>
+                <data android:mimeType="application/x-font-otf"/>
+                <data android:mimeType="application/vnd.ms-opentype"/>
+                <data android:mimeType="application/octet-stream"/>
             </intent-filter>
         </activity>
     </application>
